@@ -13,7 +13,8 @@ function handleError({ err }) {
   const status = err.statusCode || 500;
   const payload = {
     success: false,
-    message: status < 500 ? err.message : err.safeMessage || 'unexpected server error',
+    code: err.code || 'UNKNOWN_ERROR',
+    message: status < 500 ? err.message || undefined : err.safeMessage || 'unexpected server error',
   };
   this.log[status < 500 ? 'warn' : 'error'](err);
   this.status(status).json(payload);
@@ -87,7 +88,34 @@ function createActionsRouter({ events, processEvent }) {
   return router;
 }
 
-function createApp({ events, log, processEvent }) {
+function createQueriesRouter({ things }) {
+  const router = express.Router();
+  Object.keys(things).forEach((thingName) => {
+    const Thing = things[thingName];
+    Thing.queries.forEach((query) => {
+      const { name: queryName, handler: queryHandler, path: definedPath } = query;
+      const path = `/${definedPath || kebabCase(queryName)}`;
+      const method = 'get';
+      debug('exposing query %s for thing %s at %s %s', queryName, thingName, method.toUpperCase(), path);
+      router[method](path, async (req, res) => {
+        try {
+          const result = await queryHandler(req.params);
+          res.status(200).json({
+            success: true,
+            result,
+          });
+        } catch (err) {
+          handleError.call(res, { err });
+        }
+      });
+    });
+  });
+  return router;
+}
+
+function createApp({
+  events, log, processEvent, things,
+}) {
   log.trace('creating rest interface app');
   const app = express();
   app.use(createPreHandlerMiddleware({ log }));
@@ -96,21 +124,24 @@ function createApp({ events, log, processEvent }) {
   app.use(createBodyParserSyntaxErrorInterceptMiddleware());
   app.use(createHealthCheckRouter());
   app.use(createActionsRouter({ events, processEvent }));
+  app.use(createQueriesRouter({ things }));
   return app;
 }
 
 export default class RESTInterface extends Module {
   get name() { return 'rest'; }
-  get dependencies() { return ['config', 'events', 'log', 'processEvent']; }
+  get dependencies() { return ['config', 'events', 'log', 'processEvent', 'things']; }
 
   async start({
-    config, events, log, processEvent,
+    config, events, log, processEvent, things,
   }) {
     const {
       rest: { port },
     } = config;
     log.info('rest interface starting');
-    const app = createApp({ events, log, processEvent });
+    const app = createApp({
+      events, log, processEvent, things,
+    });
     const server = http.createServer(app);
     server.listen(port);
     log.info({ port }, 'rest interface started');
